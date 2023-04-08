@@ -1,4 +1,5 @@
 """Get and process a job from the horde"""
+import os
 import base64
 import time
 import traceback
@@ -462,6 +463,44 @@ class StableDiffusionHordeJob(HordeJobFramework):
         }
         if self.censored:
             self.submit_dict["state"] = self.censored
+    
+        # I don't want to risk not knowing. I need a copy to run my own tests on the final image.
+        # Save the image to a folder named "output" in the current working directory
+        # Determine the next available filename in the directory
+        output_dir = os.path.abspath("outputs")
+        os.makedirs(output_dir, exist_ok=True)
+
+        img_dir = os.path.join(output_dir, "img")
+        os.makedirs(img_dir, exist_ok=True)
+        max_file_num = 0
+        for filename in os.listdir(img_dir):
+            if filename.endswith(".png"):
+                num, seed = filename[:-4].split("-") if "-" in filename[:-4] else (filename[:-4].rjust(8, '0'), "")
+                max_file_num = max(max_file_num, int(num))
+        next_file_num = max_file_num + 1
+        # Save the image with the next available filename
+        filename = f"{next_file_num:08d}"
+
+        img_save_path = os.path.join(img_dir, filename + ".png")
+        self.image.save(img_save_path, format="PNG")
+        logger.debug(f"Image saved to {img_save_path}")
+
+        # Save the txt file with the same base filename as the png file
+        txt_dir = os.path.join(output_dir, "txt")
+        os.makedirs(txt_dir, exist_ok=True)
+        with open(os.path.join(txt_dir, filename + ".txt"), "w") as f:
+            for key, value in {"model": self.current_model, **self.current_payload}.items():
+                if key == "prompt":
+                    split_value = value.split("###")
+                    if len(split_value) > 1 and split_value[1].strip() != "":
+                        f.write(f"{key}: {split_value[0].strip()}\n")
+                        f.write(f"negative_prompt: {split_value[1].strip()}\n")
+                    else:
+                        f.write(f"{key}: {value}\n")
+                        f.write("negative_prompt: \n")
+                else:
+                    f.write(f"{key}: {value}\n")
+
 
     def post_submit_tasks(self, submit_req):
         bridge_stats.update_inference_stats(self.current_model, submit_req.json()["reward"])
