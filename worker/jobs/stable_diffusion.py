@@ -463,7 +463,8 @@ class StableDiffusionHordeJob(HordeJobFramework):
         }
         if self.censored:
             self.submit_dict["state"] = self.censored
-    
+
+
         # I don't want to risk not knowing. I need a copy to run my own tests on the final image.
         # Save the image to a folder named "output" in the current working directory
         # Determine the next available filename in the directory
