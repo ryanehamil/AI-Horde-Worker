@@ -1,9 +1,12 @@
 # webui.py
 # Simple web configuration for horde worker
 import argparse
+import contextlib
 import datetime
+import glob
 import math
 import os
+import pathlib
 import shutil
 import sys
 import time
@@ -43,13 +46,15 @@ class WebUI:
             "info": "This is a the name of your worker. It needs to be unique to the whole horde. "
             "You cannot run different workers with the same name. It will be publicly visible.",
         },
+        "dreamer_name": {
+            "label": "Dreamer Name",
+            "info": "(Optional) This is the name of your image generation worker. "
+            "It needs to be unique to the whole horde. "
+            "Overrides worker_name if specified, and defaults to worker_name if left blank/default",
+        },
         "api_key": {
             "label": "API Key",
             "info": "This is your Stable Horde API Key. You can get one free at " "https://stablehorde.net/register ",
-        },
-        "low_vram_mode": {
-            "label": "Enable low vram mode",
-            "info": "It may help worker stability to disable this if you run multiple threads.",
         },
         "horde_url": {
             "label": "The URL of the horde API server.",
@@ -88,30 +93,19 @@ class WebUI:
         "nsfw": {"label": "Enable NSFW", "info": "Allow your worker to accept jobs that contain NSFW " "content."},
         "censor_nsfw": {
             "label": "Censor NSFW images",
-            "info": "If this is true and Enable NSFW is false, the worker will accept NSFW requests, "
-            "but send back a censored image",
+            "info": "If this is true, the worker will scan all resulting images for NSFW and censor any detected. "
+            "If this is false, the worker will only scan for NSFW on client request. "
+            "This does nothing is 'Enable NSFW' is set to True.",
         },
-        "nataili_cache_home": {
-            "label": "Nataili Model Directory",
-            "info": "Downloaded models files " "are stored here.",
+        "cache_home": {
+            "label": "Model Directory",
+            "info": "Downloaded models files are stored here. The default './' is means the AI-Horde-Worker "
+            "directory (check for a folder name 'nataili' after your first run).",
         },
-        "ray_temp_dir": {
+        "temp_dir": {
             "label": "Model Cache Directory",
             "info": "Model cache data is stored here. Downloaded models are processed and copies stored "
-            "here to make loading the models faster whilst the worker is running. You can prevent "
-            "this behaviour with the 'Disable all model caching' setting below.",
-        },
-        "enable_model_cache": {
-            "label": "Enable persistent disk model cache",
-            "info": "By default the model cache uses some RAM and disk to cache models, and deletes the "
-            "cache every time the worker starts up. You can reduce your RAM usage and speed up worker "
-            "startup times by selecting this option. Good if you have fast disks.",
-        },
-        "disable_voodoo": {
-            "label": "Disable all model caching",
-            "info": "Completely disable model caching in RAM or on disk and load all models directly "
-            "into VRAM and keep them there. Requires that all loaded models fit in VRAM. "
-            "Good if you have slow disks, but don't load more models than will fit in your VRAM!",
+            "here if you load too many models to fit in RAM and VRAM.",
         },
         "always_download": {
             "label": "Automatically download required models",
@@ -134,6 +128,11 @@ class WebUI:
             "Each model can take between 2 GB to 8 GB, ensure you have enough storage space available. "
             "This number includes system models such as the safety checker and the post-processors, so "
             "don't set it too low!",
+        },
+        "alchemist_name": {
+            "label": "Alchemist Name",
+            "info": "(Optional) This is the name of your Alchemist. It needs to be unique to the whole horde. "
+            "Overrides worker_name if specified, and defaults to worker_name if left blank/default",
         },
         "forms": {
             "label": "Alchemy Worker Features",
@@ -172,6 +171,10 @@ class WebUI:
             "Larger images use a significant amount of VRAM, if you go too large your worker will crash. "
             "Common numbers are 2 (256x256), 8 (512x512), 18 (768x768), and 32 (1024x1024)",
         },
+        "models_on_disk": {
+            "label": "Already Downloaded Models To Load",
+            "info": "These are models which are already downloaded to your worker.",
+        },
         "models_to_load": {
             "label": "Individual Models To Load",
             "info": "You can select individual models to load here. These are loaded in addition to "
@@ -184,7 +187,8 @@ class WebUI:
         },
         "special_models_to_load": {
             "label": "Loading Groups of Models",
-            "info": "You can select groups of models here. 'All Models' loads all possible models. "
+            "info": "You can select groups of models here. 'All Models' loads all possible models "
+            "which will take over 500gb of space in the folder defined by the setting 'cache_home'. "
             "The other options load different subsets of models based on style. You can select "
             "more than one.",
         },
@@ -192,10 +196,46 @@ class WebUI:
             "label": "Automatically Loading Popular Models",
             "info": "Choose to automatically load the top 'n' most popular models of the day.",
         },
+        "ram_to_leave_free": {
+            "label": "RAM to Leave Free",
+            "info": "This is the amount of RAM to leave free for your system to use. You should raise this value "
+            "if you expect to run other programs on your computer while running your worker.",
+        },
+        "vram_to_leave_free": {
+            "label": "VRAM to Leave Free",
+            "info": "This is the amount of VRAM to leave free for your system to use. ",
+        },
+        "scribe_name": {
+            "label": "Scribe Name",
+            "info": "(Optional) This is a the name of your scribe worker. It needs to be unique to the whole horde. "
+            "You cannot run different workers with the same name. It will be publicly visible. "
+            "Overrides worker_name if specified, and defaults to worker_name if left blank/default",
+        },
+        "kai_url": {
+            "label": "Kai URL",
+            "info": "This is the URL of the Kobold AI Client API you want your worker to connect to. "
+            "You will probably be running your own Kobold AI Client, and you should enter the URL here.",
+        },
+        "max_length": {
+            "label": "Maximum Length",
+            "info": "This is the maximum number of tokens your worker will generate per request.",
+        },
+        "max_context_length": {
+            "label": "Maximum Context Length",
+            "info": "The max tokens to use from the prompt.",
+        },
+        "branded_model": {
+            "label": "Branded Model",
+            "info": " This will prevent the model from being used from the shared pool, but will ensure that"
+            " no other worker can pretend to serve it If you are unsure, leave this as 'None'.",
+        },
     }
+
+    _models_found_on_disk = None
 
     def __init__(self):
         self.app = None
+        self._models_found_on_disk = []
 
     def _label(self, name):
         return WebUI.INFO[name]["label"] if name in WebUI.INFO else None
@@ -260,7 +300,7 @@ class WebUI:
             elif cfgkey == "censorlist":
                 config.censorlist = self.process_input_list(value)
                 donekeys.append(key)
-            elif cfgkey == "special_models_to_load":
+            elif cfgkey == "special_models_to_load" or cfgkey == "models_on_disk":
                 models_to_load.extend(value)
                 donekeys.append(key)
             elif cfgkey == "special_top_models_to_load":
@@ -269,6 +309,19 @@ class WebUI:
                     donekeys.append(key)
             elif cfgkey == "models_to_load":
                 models_to_load.extend(value)
+                donekeys.append(key)
+            elif cfgkey == "ram_to_leave_free" or cfgkey == "vram_to_leave_free":
+                config[cfgkey] = str(value) + "%"
+                donekeys.append(key)
+            elif cfgkey == "dreamer_name" and config.get(cfgkey, "") == "An Awesome Dreamer":
+                del config["dreamer_name"]
+                donekeys.append(key)
+            elif cfgkey == "scribe_name" and config.get(cfgkey, "") == "An Awesome Scribe":
+                del config["scribe_name"]
+                donekeys.append(key)
+            elif cfgkey == "alchemist_name" and config.get(cfgkey, "") == "An Awesome Alchemist":
+                del config["alchemist_name"]
+                donekeys.append(key)
 
         # Merge the settings we have been passed into the old config,
         # don't remove anything we don't understand
@@ -297,7 +350,7 @@ class WebUI:
         )
         latest_models = self.download_models(remote_models)
 
-        available_models = [
+        models_in_reference = [
             model
             for model in latest_models
             if model
@@ -316,7 +369,36 @@ class WebUI:
                 "safety_checker",
             ]
         ]
-        return sorted(available_models, key=str.casefold)
+        aiworker_cache_home = os.environ.get("AIWORKER_CACHE_HOME", None)
+        model_cache_folder = aiworker_cache_home if aiworker_cache_home else "./"
+
+        sd_models_folder = pathlib.Path(model_cache_folder).joinpath("nataili/compvis/").resolve()
+
+        if sd_models_folder.exists():
+            all_files_in_cache = glob.glob(str(sd_models_folder.joinpath("*.*")))
+            all_files_in_cache = [
+                pathlib.Path(x).name
+                for x in all_files_in_cache
+                if not x.endswith(".sha256") and not x.endswith(".md5")
+            ]
+            for model_name, model_info in latest_models.items():
+                model_config_dict: dict = model_info.get("config", None)
+                if not model_config_dict:
+                    continue
+                model_file_config_list: list = model_config_dict.get("files", None)
+                if not model_file_config_list:
+                    continue
+                if len(model_file_config_list) == 0:
+                    continue
+                model_filename: str | None = None
+                for key in model_file_config_list:
+                    model_filename = key.get("path", None)
+                    if model_filename and "yaml" not in model_filename:
+                        break
+                if model_filename and model_filename in all_files_in_cache:
+                    self._models_found_on_disk.append(model_name)
+
+        return sorted(models_in_reference, key=str.casefold)
 
     def load_workerID(self, worker_name):
         workerID = ""
@@ -371,15 +453,21 @@ class WebUI:
         config = self.reload_config()
 
         model_list = self.load_models()
+        model_list = [model for model in model_list if model not in self._models_found_on_disk]
+        models_on_disk = []
         # Seperate out the magic constants
         models_to_load_all = []
         models_to_load_top = "None"
         models_to_load_individual = []
         for model in config.models_to_load:
-            if model and model.lower().startswith("top "):
+            if not model:
+                continue
+            if model.lower().startswith("top "):
                 models_to_load_top = model.title()
-            elif model and model.lower().startswith("all "):
+            elif model.lower().startswith("all "):
                 models_to_load_all.append(model.title())
+            elif model in self._models_found_on_disk:
+                models_on_disk.append(model)
             else:
                 models_to_load_individual.append(model)
 
@@ -422,6 +510,18 @@ class WebUI:
                         label=self._label("worker_name"),
                         value=config.worker_name,
                         info=self._info("worker_name"),
+                    )
+                    config.default("dreamer_name", "An Awesome Dreamer")
+                    dreamer_name = gr.Textbox(
+                        label=self._label("dreamer_name"),
+                        value=config.dreamer_name,
+                        info=self._info("dreamer_name"),
+                    )
+                    config.default("alchemist_name", "An Awesome Alchemist")
+                    alchemist_name = gr.Textbox(
+                        label=self._label("alchemist_name"),
+                        value=config.alchemist_name,
+                        info=self._info("alchemist_name"),
                     )
                     api_key = gr.Textbox(
                         label=self._label("api_key"),
@@ -517,6 +617,13 @@ class WebUI:
                             info=self._info("special_top_models_to_load"),
                         )
                     with gr.Row(), gr.Column():
+                        models_on_disk = gr.CheckboxGroup(
+                            choices=self._models_found_on_disk,
+                            label=self._label("models_on_disk"),
+                            value=models_on_disk,
+                            info=self._info("models_on_disk"),
+                        )
+                    with gr.Row(), gr.Column():
                         models_to_load = gr.CheckboxGroup(
                             choices=model_list,
                             label=self._label("models_to_load"),
@@ -540,18 +647,6 @@ class WebUI:
                         value=config.always_download,
                         info=self._info("always_download"),
                     )
-                    config.default("enable_model_cache", False)
-                    enable_model_cache = gr.Checkbox(
-                        label=self._label("enable_model_cache"),
-                        value=config.enable_model_cache,
-                        info=self._info("enable_model_cache"),
-                    )
-                    config.default("disable_voodoo", False)
-                    disable_voodoo = gr.Checkbox(
-                        label=self._label("disable_voodoo"),
-                        value=config.disable_voodoo,
-                        info=self._info("disable_voodoo"),
-                    )
                     config.default("max_models_to_download", 10)
                     max_models_to_download = gr.Number(
                         label=self._label("max_models_to_download"),
@@ -572,17 +667,17 @@ class WebUI:
                         precision=0,
                         info=self._info("number_of_dynamic_models"),
                     )
-                    config.default("nataili_cache_home", "./")
-                    nataili_cache_home = gr.Textbox(
-                        label=self._label("nataili_cache_home"),
-                        value=config.nataili_cache_home,
-                        info=self._info("nataili_cache_home"),
+                    config.default("cache_home", "./")
+                    cache_home = gr.Textbox(
+                        label=self._label("cache_home"),
+                        value=config.cache_home,
+                        info=self._info("cache_home"),
                     )
-                    config.default("ray_temp_dir", "./ray")
-                    ray_temp_dir = gr.Textbox(
-                        label=self._label("ray_temp_dir"),
-                        value=config.ray_temp_dir,
-                        info=self._info("ray_temp_dir"),
+                    config.default("temp_dir", "./tmp")
+                    temp_dir = gr.Textbox(
+                        label=self._label("temp_dir"),
+                        value=config.temp_dir,
+                        info=self._info("temp_dir"),
                     )
 
                 with gr.Tab("Security"), gr.Column():
@@ -640,6 +735,29 @@ class WebUI:
                         value=config.queue_size,
                         info=self._info("queue_size"),
                     )
+                    parsed_ram_from_config = 40
+                    with contextlib.suppress(Exception):
+                        parsed_ram_from_config = int(config.ram_to_leave_free.split("%")[0])
+                    ram_to_leave_free = gr.Slider(
+                        0,
+                        100,
+                        step=1,
+                        label=self._label("ram_to_leave_free"),
+                        value=parsed_ram_from_config,
+                        info=self._info("ram_to_leave_free"),
+                    )
+                    parsed_vram_from_config = 40
+                    with contextlib.suppress(Exception):
+                        parsed_vram_from_config = int(config.vram_to_leave_free.split("%")[0])
+
+                    vram_to_leave_free = gr.Slider(
+                        0,
+                        100,
+                        step=1,
+                        label=self._label("vram_to_leave_free"),
+                        value=parsed_vram_from_config,
+                        info=self._info("vram_to_leave_free"),
+                    )
 
                 with gr.Tab("Advanced"), gr.Column():
                     config.default("enable_terminal_ui", False)
@@ -648,17 +766,11 @@ class WebUI:
                         value=config.enable_terminal_ui,
                         info=self._info("enable_terminal_ui"),
                     )
-                    config.default("horde_url", "https://stablehorde.net/")
+                    config.default("horde_url", "https://aihorde.net/")
                     horde_url = gr.Textbox(
                         label=self._label("horde_url"),
                         value=config.horde_url,
                         info=self._info("horde_url"),
-                    )
-                    config.default("low_vram_mode", True)
-                    low_vram_mode = gr.Checkbox(
-                        label=self._label("low_vram_mode"),
-                        value=config.low_vram_mode,
-                        info=self._info("low_vram_mode"),
                     )
                     config.default("stats_output_frequency", 30)
                     stats_output_frequency = gr.Number(
@@ -686,6 +798,47 @@ class WebUI:
                         inputs=[worker_name, worker_id, maintenance_mode, api_key],
                         outputs=[maint_message],
                     )
+                with gr.Tab("Scribe Options"), gr.Column():
+                    gr.Markdown(
+                        "Options for the Scribes (text workers)",
+                    )
+                    config.default("scribe_name", "An Awesome Scribe")
+                    scribe_name = gr.Textbox(
+                        label=self._label("scribe_name"),
+                        value=config.scribe_name,
+                        info=self._info("scribe_name"),
+                    )
+                    config.default("kai_url", "http://localhost:5000")
+                    kai_url = gr.Textbox(
+                        label=self._label("kai_url"),
+                        value=config.kai_url,
+                        info=self._info("kai_url"),
+                    )
+
+                    config.default("max_length", 80)
+                    max_length = gr.Slider(
+                        0,
+                        240,
+                        step=10,
+                        label=self._label("max_length"),
+                        value=config.max_length,
+                        info=self._info("max_length"),
+                    )
+                    config.default("max_context_length", 1024)
+                    max_context_length = gr.Slider(
+                        0,
+                        8192,
+                        step=128,
+                        label=self._label("max_context_length"),
+                        value=config.max_context_length,
+                        info=self._info("max_context_length"),
+                    )
+                    config.default("branded_model", False)
+                    branded_model = gr.Checkbox(
+                        label=self._label("branded_model"),
+                        value=config.branded_model,
+                        info=self._info("branded_model"),
+                    )
 
             with gr.Row():
                 submit = gr.Button(value="Save Configuration", variant="primary")
@@ -695,6 +848,7 @@ class WebUI:
             submit.click(
                 self.save_config,
                 inputs={
+                    alchemist_name,
                     allow_controlnet,
                     allow_img2img,
                     allow_painting,
@@ -705,29 +859,35 @@ class WebUI:
                     blacklist,
                     censor_nsfw,
                     censorlist,
-                    disable_voodoo,
+                    dreamer_name,
                     dynamic_models,
-                    enable_model_cache,
                     enable_terminal_ui,
                     forms,
                     horde_url,
-                    low_vram_mode,
                     max_models_to_download,
                     max_power,
                     max_threads,
+                    models_on_disk,
                     models_to_load,
                     models_to_skip,
-                    nataili_cache_home,
+                    cache_home,
                     nsfw,
                     number_of_dynamic_models,
                     priority_usernames,
                     queue_size,
-                    ray_temp_dir,
+                    temp_dir,
                     require_upfront_kudos,
                     special_models_to_load,
                     special_top_models_to_load,
                     stats_output_frequency,
                     worker_name,
+                    ram_to_leave_free,
+                    vram_to_leave_free,
+                    scribe_name,
+                    kai_url,
+                    max_length,
+                    max_context_length,
+                    branded_model,
                 },
                 outputs=[message],
             )

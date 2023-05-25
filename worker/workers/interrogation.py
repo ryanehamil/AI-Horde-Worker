@@ -1,8 +1,7 @@
 """This is the worker, it's the main workhorse that deals with getting requests, and spawning data processing"""
-from nataili.util.logger import logger
-
 from worker.jobs.interrogation import InterrogationHordeJob
 from worker.jobs.poppers import InterrogationPopper
+from worker.logger import logger
 from worker.workers.framework import WorkerFramework
 
 
@@ -27,3 +26,6 @@ class InterrogationWorker(WorkerFramework):
         super().reload_data()
         self.bridge_data.check_models(self.model_manager)
         self.bridge_data.reload_models(self.model_manager)
+
+    def get_uptime_kudos(self):
+        return 40 * 6
